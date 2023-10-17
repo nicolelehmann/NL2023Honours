@@ -1,0 +1,130 @@
+---
+title: "Tiwi Variant Analysis"
+author: "Nicole Lehmann"
+date: '2023-06-06'
+output:
+  html_document:
+    df_print: paged
+  theme: hpstr
+  prettydoc::html_pretty: null
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r message=FALSE}
+library(data.table)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(flextable)
+```
+
+
+```{r}
+dat <- fread("out.Tiwi.gno.tsv.gz")
+
+```
+
+```{r}
+dat_samples <- dat %>% select(-gnomad, -z_score, -AF) %>% group_by(gene, aa_ref, aa_pos, aa_alt, zygosity) %>% summarise(samples = coalesce(str_c(sample_id, collapse = ", "))) #one row per gene/variant (Hom/Het separated), sample_ids joined (this combines duplicate lines which are due to different nucleotide changes causing the same AA change)
+dat_select <- dat %>% select(gene, uniprot, snv, aa_ref, aa_pos, aa_alt, zygosity, PolyPhen_score, PolyPhen_category, SIFT_score, SIFT_category, ddg, z_score, bin, AF, AF_afr, AF_amr, AF_asj, AF_eas, AF_sas, AF_fin, AF_nfe, AF_oth)
+dat_all <- dat_samples %>% left_join(dat_select, by = c("gene", "aa_ref", "aa_pos", "aa_alt", "zygosity")) %>% distinct(gene, aa_ref, aa_pos, aa_alt, zygosity, .keep_all = T)
+```
+
+
+### First filter: DDG predictions from Maestro
+```{r}
+dat_filt <- dat_all %>% filter(ddg>0.8|ddg<(-0.5) & abs(z_score)>0.8)
+
+var_ddg_filt <- dat_filt %>% select(gene, aa_ref, aa_pos, aa_alt) %>% unique()
+nrow(var_ddg_filt)
+genes_ddg_filt <- dat_filt$gene %>% unique()
+length(genes_ddg_filt)
+```
+
+This produces a list of 3,636 variants across 2,524 genes with notable Maestro DDG predictions.
+
+
+### Second filter: Tiwi population frequency
+```{r}
+dat_long_filt <- dat_filt %>% separate_rows(samples, sep = ", ") %>% distinct(gene, aa_ref, aa_pos, aa_alt, zygosity, samples, .keep_all = T) #expand to one row per variant per individual
+variant_pop_counts <- dat_long_filt %>% group_by(gene, aa_ref, aa_pos, aa_alt, zygosity) %>% summarise(n=n()) #calculate how many individuals each variant is present in
+variant_hom <- variant_pop_counts[variant_pop_counts$zygosity=="Hom",] %>% mutate(T_AF = n*2/242)
+variant_het <- variant_pop_counts[variant_pop_counts$zygosity=="Het",] %>% mutate(T_AF = n/242)
+variant_pop_counts <- bind_rows(variant_hom, variant_het)
+variant_pop_counts <- variant_pop_counts %>% left_join(dat_filt%>%select(-samples), by=c("gene", "aa_ref", "aa_pos", "aa_alt", "zygosity"))
+var_filt_Tiwis <- variant_pop_counts %>% filter(n>3)
+
+var_Tpop_filt <- var_filt_Tiwis %>% select(gene, aa_ref, aa_pos, aa_alt) %>% unique()
+nrow(var_Tpop_filt)
+genes_Tpop_filt <- var_filt_Tiwis$gene %>% unique()
+length(genes_Tpop_filt)
+```
+
+This produces a list of 2,346 variants across 1,754 genes which have notable Maestro DDG predictions and are found in more than 3 Tiwi individuals. 
+
+
+### Third filter: Global population frequency
+```{r}
+var_filt_rare <- var_filt_Tiwis %>% filter(AF<0.01)
+
+var_AF_filt <- var_filt_rare %>% select(gene, aa_ref, aa_pos, aa_alt) %>% unique()
+nrow(var_AF_filt)
+genes_AF_filt <- var_filt_rare$gene %>% unique()
+length(genes_AF_filt)
+```
+
+This produces a list of 423 variants across 367 genes which have notable Maestro DDG predictions, and are found in more than 3 Tiwi individuals but are globally rare.
+
+
+#### Need to also consider the novel variants with notable Maestro predictions which got filtered out by allele frequency
+```{r}
+var_novel <- var_filt_Tiwis[is.na(var_filt_Tiwis$AF),]
+
+var_novel_filt <- var_novel %>% select(gene, aa_ref, aa_pos, aa_alt) %>% unique()
+nrow(var_novel_filt)
+genes_novel_filt <- var_novel$gene %>% unique()
+length(genes_novel_filt)
+```
+
+There are 295 variants across 286 genes which have notable Maestro DDG predictions, are present in more than 3 Tiwi individuals and not captured in GnomAD.
+
+
+### Final filter: Gene is within the list of 2726 genes involved in inflammatory/immune response according to GO Terms
+```{r}
+inflam <- read_tsv("InflammatoryGO.tsv")
+inflam <- inflam %>% select(SYMBOL, `GO NAME`)
+immun <- read_tsv("ImmuneGO.tsv")
+immun <- immun %>% select(SYMBOL, `GO NAME`)
+GO <- rbind(inflam, immun)
+GO_genes <- unique(GO$SYMBOL) #list of 2726 genes involved in inflammatory/immune response
+cand <- var_filt_rare %>% filter(gene %in% GO_genes)
+
+var_GO_filt <- cand %>% select(gene, aa_ref, aa_pos, aa_alt) %>% unique()
+nrow(var_GO_filt)
+genes_GO_filt <- cand$gene %>% unique()
+length(genes_GO_filt)
+
+write_csv(cand, "Rare_Candidate_Variants.csv", col_names = T)
+```
+
+This produced a candidate list of 65 variants across 45 genes with notable Maestro scores and biological relevance, which are found in more than 3 Tiwi individuals but rare in the global population.
+
+
+```{r}
+cand_novel <- var_novel %>% filter(gene %in% GO_genes)
+
+var_GO_novel <- cand_novel %>% select(gene, aa_ref, aa_pos, aa_alt) %>% unique()
+nrow(var_GO_novel)
+genes_GO_novel <- cand_novel$gene %>% unique()
+length(genes_GO_novel)
+
+write_csv(cand_novel, "Novel_Candidate_Variants.csv", col_names = T)
+```
+
+This produced a list of 24 novel variants across 23 genes with notable Maestro scores and biological relevance, which are found in more than 3 Tiwis while extremely rare or perhaps not found in other populations (not captured in GnomAD).
+
+
